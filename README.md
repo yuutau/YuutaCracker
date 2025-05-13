@@ -28,6 +28,7 @@ Herramienta de cracking desarrollada y diseñada principalmente para WPA2/WPA3 (
 - Windows recomendado (con soporte para `.22000` y entorno gráfico)
 
 Este proyecto está disponible bajo la [Licencia MIT](LICENSE). No se permite usar este código para fines comerciales sin la debida atribución. No se permite redistribuir o modificar el código sin seguir los términos de la licencia.
+
 Github: yuutau & telegram: t.me/valuado
 ![Image](https://github.com/user-attachments/assets/73db8d15-7a9f-4611-ba2e-3baea017cdeb)
 
