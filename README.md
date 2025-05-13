@@ -29,3 +29,5 @@ Herramienta de cracking desarrollada y diseñada principalmente para WPA2/WPA3 (
 
 Github: yuutau & telegram: t.me/valuado
 ![Image](https://github.com/user-attachments/assets/73db8d15-7a9f-4611-ba2e-3baea017cdeb)
+
+![Image](https://github.com/user-attachments/assets/f29d808e-7579-4f41-b02e-89a1a07391b4)
