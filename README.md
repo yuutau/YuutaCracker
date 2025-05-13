@@ -1,6 +1,6 @@
 YuutaCracker
 
-Herramienta avanzada de cracking desarrollada por **Yuuta**, diseñada principalmente para WPA2/WPA3 (`.22000`), pero adaptada a múltiples algoritmos como MD5, SHA1, SHA256, SHA512 y más, utilizando el poder de **Hashcat**.
+Herramienta de cracking desarrollada y diseñada principalmente para WPA2/WPA3 (`.22000`), pero adaptada a múltiples algoritmos como MD5, SHA1, SHA256, SHA512 y más, empleando la tool de **Hashcat**.
 
 > ⚙️ Diseñada para usuarios técnicos.
 
@@ -26,3 +26,5 @@ Herramienta avanzada de cracking desarrollada por **Yuuta**, diseñada principal
 - Python 3.8 o superior
 - [Hashcat](https://hashcat.net/hashcat/) instalado y accesible
 - Windows recomendado (con soporte para `.22000` y entorno gráfico)
+
+Github: yuutau & telegram: t.me/valuado
