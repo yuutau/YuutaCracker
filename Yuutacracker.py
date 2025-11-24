@@ -6,10 +6,10 @@ import json
 import logging
 import requests
 from shutil import which
-import tkinter as tk
-from tkinter import filedialog
 from datetime import datetime
 import signal 
+import ctypes
+import hashlib
 
 # ct ppl on top
 # dependencias papu
@@ -211,10 +211,32 @@ def enviar_notificacion_discord(mensaje):
             logging.error(f"Error al enviar notificacion a Discord: {e}")
 
 def optimizar_parametros():
-    if configuracion["optimizar_automaticamente"]:
-        print(Colores.cyan + "[INFO] Optimizando parametros para tu hardware..." + Colores.reset)
-        configuracion["kernel_accel"] = "64"
-        configuracion["kernel_loops"] = "256"
+    try:
+        hashcat = configuracion.get("ruta_hashcat")
+        if not hashcat:
+            return None
+
+        proceso = subprocess.Popen(
+            [hashcat, "-I"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+
+        salida = proceso.communicate()[0]
+
+        dispositivos = []
+
+        for linea in salida.splitlines():
+            if "Device #" in linea or "Backend" in linea:
+                dispositivos.append(linea.strip())
+
+        return dispositivos
+
+    except Exception as e:
+        logging.error(f"Error en optimización: {e}")
+        return None
+
 
 def configurar_multiples_gpus():
     respuesta = input(t("gpu_multiples")).strip().lower()
@@ -239,16 +261,32 @@ def mostrar_calavera_verde():
 
 def buscar_hashcat():
     hashcat_path = which("hashcat")
-    if (hashcat_path and os.path.isfile(hashcat_path)):
+    if hashcat_path and os.path.isfile(hashcat_path):
         return hashcat_path
-    posibles = ["C:\\Hashcat\\hashcat.exe", "C:\\Program Files\\hashcat\\hashcat.exe"]
-    for ruta in posibles:
-        if os.path.isfile(ruta):
-            return ruta
+
+    print("[INFO] Buscando hashcat.exe globalmente...")
+
+    unidades = []
+    bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+    letras = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for i in range(26):
+        if bitmask & (1 << i):
+            unidades.append(letras[i] + ":\\")
+
+    for unidad in unidades:
+        for root, dirs, files in os.walk(unidad, topdown=True):
+            dirs[:] = [d for d in dirs if d.lower() not in ["windows", "programdata", "appdata", "recycle.bin"]]
+
+            if "hashcat.exe" in files:
+                ruta = os.path.join(root, "hashcat.exe")
+                print(f"[INFO] Encontrado: {ruta}")
+                return ruta
+
     manual = input("Ruta de hashcat.exe: ").strip().strip('"')
     if os.path.isfile(manual):
         return manual
-    print(Colores.rojo + "No se encontro hashcat." + Colores.reset)
+
+    print("[!] No se encontró hashcat.exe en todo el sistema.")
     return None
 
 def asegurar_directorio_hashcat(path_hashcat):
@@ -266,28 +304,47 @@ def seleccionar_dispositivo(hashcat):
         print(Colores.rojo + "[!] No se pudo detectar dispositivos:\n" + Colores.reset + e.output)
 
 def generar_mascara_personalizada():
+    """
+    Genera una máscara simple basada en la longitud y tipo de caracteres.
+    Devuelve la máscara (ej. '?l?l?d?d') o None si el usuario cancela.
+    """
     try:
-        longitud = int(input(t("longitud")).strip())
+        longitud = input("Longitud (enter para cancelar): ").strip()
+        if longitud == "":
+            return None
+        longitud = int(longitud)
     except ValueError:
-        print(t("error_entrada"))
+        print(Colores.rojo + "Longitud invalida." + Colores.reset)
         return None
-    print(t("caracteres"))
-    print("[1] " + t("minusculas"))
-    print("[2] " + t("mayusculas"))
-    print("[3] " + t("numeros"))
-    print("[4] " + t("combinado"))
-    opcion = input(t("tipo")).strip()
+
+    print("Tipo de caracteres:")
+    print("[1] Minusculas")
+    print("[2] Mayusculas")
+    print("[3] Numeros")
+    print("[4] Alfanumerico (mix)")
+    opcion = input("Selecciona tipo: ").strip()
+
     if opcion == "1":
-        return "?l" * longitud
+        plantilla = "?l"
     elif opcion == "2":
-        return "?u" * longitud
+        plantilla = "?u"
     elif opcion == "3":
-        return "?d" * longitud
+        plantilla = "?d"
     elif opcion == "4":
-        import random
-        return ''.join(random.choice(["?l", "?u", "?d"]) for _ in range(longitud))
+        plantilla = "?l?u?d"
     else:
+        print(Colores.rojo + "Opcion invalida." + Colores.reset)
         return None
+
+    if len(plantilla) > 2 and plantilla.count("?") > 1:
+        mascara = "".join(plantilla.split("?")[1:][i % len(plantilla.split("?")[1:])] for i in range(longitud))
+        if not mascara:
+            mascara = "?l" * longitud
+    else:
+        mascara = plantilla * longitud
+
+    print(Colores.verde + f"[INFO] Mascara generada: {mascara}" + Colores.reset)
+    return mascara
 
 def mostrar_estado_diccionario(start_time, total_lines, current_line, keys_per_sec):
     transcurrido = int(time.time() - start_time)
@@ -367,6 +424,8 @@ def lanzar_hashcat(archivo, mascara, modo, diccionario=None, reglas=None, diccio
         proceso = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         start_time = time.time()
 
+        fallo = False 
+
         while proceso.poll() is None:
             output = proceso.stdout.readline().strip()
             if output:
@@ -383,7 +442,29 @@ def lanzar_hashcat(archivo, mascara, modo, diccionario=None, reglas=None, diccio
                         proceso.terminate()
                         break
                 except json.JSONDecodeError:
+                    if "error" in output.lower():
+                        fallo = True
                     continue
+
+        proceso.wait()
+
+        resultado = "exito"
+        if fallo or proceso.returncode != 0:
+            resultado = "fallo"
+
+        try:
+            guardar_en_historial(modo, archivo, resultado)
+        except Exception as e:
+            logging.error("Error guardando historial: %s", e)
+
+        try:
+            if configuracion.get("webhook_discord") or configuracion.get("telegram_token"):
+                enviar_notificacion_avanzada(
+                    f"Ataque terminado ({resultado}). Archivo: {archivo}"
+                )
+        except Exception as e:
+            logging.error("Error enviando notificación: %s", e)
+        # ---------------------------------------------------------
 
         print(Colores.verde + "\n[✓] Ataque finalizado.\n" + Colores.reset)
         logging.info("Ataque finalizado.")
@@ -391,9 +472,11 @@ def lanzar_hashcat(archivo, mascara, modo, diccionario=None, reglas=None, diccio
         enviar_notificacion_telegram("Ataque finalizado. Clave no encontrada.")
         generar_reporte_detallado(modo, archivo, "No encontrada", tiempo_inicio, datetime.now())
         time.sleep(1)
+
     except Exception as e:
         print(Colores.rojo + f"[!] Error inesperado: {e}" + Colores.reset)
         logging.error(f"Error inesperado: {e}")
+
 
 def lanzar_hashcat_combinado(archivo, diccionario1, diccionario2, reglas=None, diccionarios=None, formato_hash="22000"):
     try:
@@ -424,14 +507,21 @@ def lanzar_hashcat_combinado(archivo, diccionario1, diccionario2, reglas=None, d
 
         asegurar_directorio_hashcat(hashcat)
         proceso = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
         print(Colores.cyan + "[INFO] Hashcat iniciando en modo combinado...\n" + Colores.reset)
         logging.info("Hashcat iniciado en modo combinado con argumentos: " + " ".join(args))
 
+        fallo = False
+
         while proceso.poll() is None:
-            output = proceso.stdout.readline()
+            output = proceso.stdout.readline().strip()
             if output:
                 try:
                     data = json.loads(output)
+                    estado = mostrar_estado_hashcat(data)
+                    if estado == "error":
+                        fallo = True
+
                     if 'password' in data:
                         clave = data['password']
                         print(Colores.verde + f"\n[✓] Clave encontrada: {clave}" + Colores.reset)
@@ -439,9 +529,32 @@ def lanzar_hashcat_combinado(archivo, diccionario1, diccionario2, reglas=None, d
                         enviar_notificacion_discord(f"Clave encontrada: {clave}")
                         enviar_notificacion_telegram(f"Clave encontrada: {clave}")
                         generar_reporte_detallado("combinado", archivo, clave, tiempo_inicio, datetime.now())
+                        proceso.terminate()
                         break
+
                 except json.JSONDecodeError:
+                    if "error" in output.lower():
+                        fallo = True
                     pass
+
+        proceso.wait()
+
+        resultado = "exito"
+        if fallo or proceso.returncode != 0:
+            resultado = "fallo"
+
+        try:
+            guardar_en_historial("combinado", archivo, resultado)
+        except Exception as e:
+            logging.error("Error guardando historial: %s", e)
+
+        try:
+            if configuracion.get("webhook_discord") or configuracion.get("telegram_token"):
+                enviar_notificacion_avanzada(
+                    f"Ataque combinado terminado ({resultado}). Archivo: {archivo}"
+                )
+        except Exception as e:
+            logging.error("Error enviando notificación: %s", e)
 
         print(Colores.verde + "\n[✓] Ataque combinado finalizado.\n" + Colores.reset)
         logging.info("Ataque combinado finalizado.")
@@ -449,6 +562,7 @@ def lanzar_hashcat_combinado(archivo, diccionario1, diccionario2, reglas=None, d
         enviar_notificacion_telegram("Ataque combinado finalizado. Clave no encontrada.")
         generar_reporte_detallado("combinado", archivo, "No encontrada", tiempo_inicio, datetime.now())
         time.sleep(1)
+
     except subprocess.CalledProcessError as e:
         print(Colores.rojo + "[!] Error en hashcat:\n" + Colores.reset + str(e))
         logging.error(f"Error en hashcat: {e}")
@@ -456,32 +570,61 @@ def lanzar_hashcat_combinado(archivo, diccionario1, diccionario2, reglas=None, d
         print(Colores.rojo + f"[!] Error inesperado: {e}" + Colores.reset)
         logging.error(f"Error inesperado: {e}")
 
-def mostrar_estado_hashcat(data, start_time):
-    speed = data.get("devices", [{}])[0].get("speed", 0)
-    progress = data.get("progress", [0, 1])
-    tiempo_actual = int(time.time())
-    transcurrido = max(0, tiempo_actual - start_time)
-    restante = max(0, (progress[1] - progress[0]) / speed) if speed > 0 else 0
 
-    def segundos_a_formato(segundos):
-        mins, secs = divmod(int(segundos), 60)
-        hours, mins = divmod(mins, 60)
-        return f"{hours:02}:{mins:02}:{secs:02}"
+def mostrar_estado_hashcat(data, start_time=None):
+    """
+    Interpreta el JSON de Hashcat. Devuelve:
+    - "found" si Hashcat ha encontrado una clave
+    - "error" si detecta un error
+    - None para continuar normalmente
+    """
+    try:
+        if not isinstance(data, dict):
+            return None
 
-    print(Colores.cyan + f"\n[INFO] Claves por segundo: {speed:,} H/s" + Colores.reset)
-    print(f"[INFO] Progreso: {progress[0]:,} / {progress[1]:,}")
-    print(f"[INFO] Tiempo transcurrido: {segundos_a_formato(transcurrido)}")
-    print(f"[INFO] Estimado restante: {segundos_a_formato(restante)}")
-    print(Colores.amarillo + "\nTeclas utiles: [q] salir  [p] pausar  [r] reanudar\n" + Colores.reset)
+        if "error" in str(data).lower():
+            print(Colores.rojo + "[!] Hashcat reportó un error." + Colores.reset)
+            return "error"
+
+        if "password" in data:
+            return "found"
+
+        if "devices" in data:
+            speed_total = 0
+            for dev in data["devices"]:
+                try:
+                    speed_total += int(dev.get("speed", 0))
+                except:
+                    pass
+
+            print(Colores.cyan + f"[INFO] Claves por segundo: {speed_total:,} H/s" + Colores.reset)
+
+        if "progress" in data and isinstance(data["progress"], list) and len(data["progress"]) == 2:
+            prog, total = data["progress"]
+            try:
+                pct = (prog / total) * 100
+                print(Colores.amarillo + f"[INFO] Progreso: {pct:.2f}% ({prog}/{total})" + Colores.reset)
+            except:
+                pass
+
+        if start_time is not None:
+            elapsed = time.time() - start_time
+            print(Colores.cyan + f"[INFO] Tiempo: {elapsed:.1f}s" + Colores.reset)
+
+        return None
+
+    except Exception as e:
+        print(Colores.rojo + f"[!] Error en mostrar_estado_hashcat: {e}" + Colores.reset)
+        return "error"
 
 def guardar_en_historial(tipo_ataque, archivo, resultado):
     try:
         ruta_historial = os.path.join(BASE_DIR, "historial.txt")
-        with open(ruta_historial, "a") as file:
+        with open(ruta_historial, "a", encoding="utf-8") as file:
             file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Tipo: {tipo_ataque}, Archivo: {archivo}, Resultado: {resultado}\n")
-        print(Colores.verde + f"[INFO] Historial actualizado en {ruta_historial}" + Colores.reset)
+        logging.info("Historial actualizado: %s %s %s", tipo_ataque, archivo, resultado)
     except Exception as e:
-        print(Colores.rojo + f"[!] Error al guardar en el historial: {e}" + Colores.reset)
+        logging.error("Error guardando historial: %s", e, exc_info=True)
 
 def mostrar_historial():
     try:
@@ -506,16 +649,40 @@ def seleccionar_diccionarios():
     return diccionarios
 
 def buscar_en_base_de_datos(hash_input):
+    """
+    Espera una contraseña en texto u hash. Si parece ser un hash SHA1 (40 hex), usa HIBP range API.
+    Si recibe texto plano, calcula su SHA1 y lo busca.
+    """
     try:
-        import requests
-        url = f"https://api.pwnedpasswords.com/range/{hash_input[:5]}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            print(Colores.verde + "[INFO] Hash encontrado en la base de datos." + Colores.reset)
+        posible = hash_input.strip()
+        if len(posible) != 40 or not all(c in "0123456789abcdefABCDEF" for c in posible):
+            sha1 = hashlib.sha1(posible.encode("utf-8")).hexdigest().upper()
         else:
-            print(Colores.amarillo + "[INFO] Hash no encontrado en la base de datos." + Colores.reset)
+            sha1 = posible.upper()
+
+        prefix = sha1[:5]
+        suffix = sha1[5:]
+
+        url = f"https://api.pwnedpasswords.com/range/{prefix}"
+        import requests
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            print(Colores.amarillo + "[INFO] No se pudo consultar la base de datos HIBP." + Colores.reset)
+            return False
+
+        lines = resp.text.splitlines()
+        for line in lines:
+            parts = line.split(':')
+            if len(parts) >= 2 and parts[0].strip().upper() == suffix:
+                count = parts[1].strip()
+                print(Colores.rojo + f"[!] Hash encontrado en HIBP (veces): {count}" + Colores.reset)
+                return True
+
+        print(Colores.verde + "[INFO] Hash no encontrado en HIBP." + Colores.reset)
+        return False
     except Exception as e:
-        print(Colores.rojo + f"[!] Error al buscar en la base de datos: {e}" + Colores.reset)
+        print(Colores.rojo + f"[!] Error al buscar en base de datos: {e}" + Colores.reset)
+        return False
 
 def seleccionar_reglas():
     reglas = input("Archivo de reglas (.rule): ").strip()
@@ -525,20 +692,52 @@ def seleccionar_reglas():
         print(Colores.rojo + "[!] Archivo de reglas no valido." + Colores.reset)
         return None
 
-def enviar_notificacion_avanzada(mensaje, metodo="discord"):
-    try:
-        if metodo == "discord" and configuracion["notificaciones_discord"] and configuracion["webhook_discord"]:
-            import requests
-            data = {"content": mensaje}
-            requests.post(configuracion["webhook_discord"], json=data)
-            print(Colores.verde + "[INFO] Notificacion enviada a Discord." + Colores.reset)
-        elif metodo == "email":
-            print(Colores.amarillo + "[INFO] Notificaciones por correo no implementadas aun." + Colores.reset)
-        elif metodo == "telegram":       
-            print(Colores.amarillo + "[INFO] Notificaciones por Telegram no implementadas aun." + Colores.reset)
-    except Exception as e:
-        print(Colores.rojo + f"[!] Error al enviar notificacion: {e}" + Colores.reset)
+def enviar_notificacion_avanzada(mensaje):
+    """
+    Envía notificaciones por Telegram y/o Discord Webhook.
+    - Usa configuracion["telegram_token"] y configuracion["telegram_chatid"]
+    - Usa configuracion["webhook_discord"]
+    Retorna True si al menos un método se envió correctamente.
+    """
 
+    exito = False
+
+    try:
+        token = configuracion.get("telegram_token")
+        chat_id = configuracion.get("telegram_chatid")
+
+        if token and chat_id:
+            import requests
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            data = {"chat_id": chat_id, "text": mensaje}
+            r = requests.post(url, data=data, timeout=8)
+
+            if r.status_code == 200:
+                exito = True
+            else:
+                print(Colores.amarillo + f"[!] Telegram devolvió {r.status_code}: {r.text}" + Colores.reset)
+
+    except Exception as e:
+        print(Colores.rojo + f"[!] Error enviando Telegram: {e}" + Colores.reset)
+        logging.error("Error Telegram: %s", e)
+
+    try:
+        webhook = configuracion.get("webhook_discord")
+        if webhook:
+            import requests
+            payload = {"content": mensaje}
+            r = requests.post(webhook, json=payload, timeout=8)
+
+            if r.status_code in (200, 204):
+                exito = True
+            else:
+                print(Colores.amarillo + f"[!] Discord devolvió {r.status_code}: {r.text}" + Colores.reset)
+
+    except Exception as e:
+        print(Colores.rojo + f"[!] Error enviando Discord: {e}" + Colores.reset)
+        logging.error("Error Discord: %s", e)
+
+    return exito
 def lanzar_ataque_hibrido(archivo, diccionario, mascara, reglas=None, diccionarios=None, formato_hash="22000"):
     try:
         tiempo_inicio = datetime.now()
@@ -569,13 +768,68 @@ def lanzar_ataque_hibrido(archivo, diccionario, mascara, reglas=None, diccionari
         print(Colores.cyan + "[INFO] Hashcat iniciando en modo hibrido...\n" + Colores.reset)
         logging.info("Hashcat iniciado en modo hibrido con argumentos: " + " ".join(args))
 
+        asegurar_directorio_hashcat(hashcat)
         proceso = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+        fallo = False
+
         while proceso.poll() is None:
-            output = proceso.stdout.readline()
-            if output:
-                print(output.strip())
+            output = proceso.stdout.readline().strip()
+            if not output:
+                continue
+
+            try:
+                data = json.loads(output)
+                estado = mostrar_estado_hashcat(data)
+
+                if estado == "error":
+                    fallo = True
+
+                if 'password' in data:
+                    clave = data['password']
+                    print(Colores.verde + f"\n[✓] Clave encontrada: {clave}" + Colores.reset)
+                    guardar_clave_en_archivo(clave)
+                    enviar_notificacion_discord(f"Clave encontrada: {clave}")
+                    enviar_notificacion_telegram(f"Clave encontrada: {clave}")
+                    generar_reporte_detallado("hibrido", archivo, clave, tiempo_inicio, datetime.now())
+                    proceso.terminate()
+                    break
+
+            except json.JSONDecodeError:
+                if "error" in output.lower() or "no such file" in output.lower():
+                    fallo = True
+                print(output)
+
+        proceso.wait()
+
+        resultado = "exito"
+        if fallo or proceso.returncode != 0:
+            resultado = "fallo"
+
+        try:
+            guardar_en_historial("hibrido", archivo, resultado)
+        except Exception as e:
+            logging.error("Error guardando historial: %s", e)
+
+        try:
+            if configuracion.get("webhook_discord") or configuracion.get("telegram_token"):
+                enviar_notificacion_avanzada(
+                    f"Ataque hibrido terminado ({resultado}). Archivo: {archivo}"
+                )
+        except Exception as e:
+            logging.error("Error enviando notificación: %s", e)
+
+        print(Colores.verde + "\n[✓] Ataque hibrido finalizado.\n" + Colores.reset)
+        logging.info("Ataque hibrido finalizado.")
+        enviar_notificacion_discord("Ataque hibrido finalizado.")
+        enviar_notificacion_telegram("Ataque hibrido finalizado. Clave no encontrada.")
+        generar_reporte_detallado("hibrido", archivo, "No encontrada", tiempo_inicio, datetime.now())
+        time.sleep(1)
+
     except Exception as e:
         print(Colores.rojo + f"[!] Error al iniciar el ataque hibrido: {e}" + Colores.reset)
+        logging.error(f"Error en ataque hibrido: {e}")
+
 
 # Validacion de dependencias
 def validar_dependencias():
@@ -603,6 +857,7 @@ def configurar_ataque(modo):
 
     return reglas, diccionarios
 
+
 def mostrar_algoritmos():
     print(Colores.cyan + t("algoritmos_soportados") + Colores.reset)
     for codigo, nombre in ALGORITMOS_HASH.items():
@@ -611,14 +866,29 @@ def mostrar_algoritmos():
     input(Colores.amarillo + t("presiona_enter") + Colores.reset)
 
 def seleccionar_archivo():
-    root = tk.Tk()
-    root.withdraw()
-    archivo = filedialog.askopenfilename(title="Selecciona un archivo")
-    if archivo:
-        print(Colores.verde + f"[INFO] Archivo seleccionado: {archivo}" + Colores.reset)
-        return archivo
-    else:
-        print(Colores.rojo + "[!] No se selecciono ningun archivo." + Colores.reset)
+    """
+    Abre un diálogo para seleccionar un archivo.
+    Devuelve ruta válida o None si el usuario cancela.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+
+        archivo = filedialog.askopenfilename()
+
+        root.destroy()
+
+        if not archivo:
+            return None
+
+        return archivo.strip('"')
+
+    except Exception as e:
+        print(Colores.rojo + f"[!] Error al seleccionar archivo: {e}" + Colores.reset)
         return None
 
 def validar_algoritmo_hash(hash_input):
@@ -634,11 +904,37 @@ def validar_archivo(ruta):
     return True
 
 def configurar_diccionarios_si_relevante(modo):
-    if modo in ["diccionario", "combinado", "hibrido"]:
-        usar_multiples_diccionarios = input("¿Deseas usar multiples diccionarios? (s/n): ").strip().lower()
-        if usar_multiples_diccionarios == "s":
-            return seleccionar_diccionarios()
+    modo = modo.lower()
+    if modo == "diccionario":
+        print(Colores.cyan + "[INFO] Selecciona el diccionario para ataque por diccionario." + Colores.reset)
+        dic = seleccionar_archivo()
+        if not dic or not validar_archivo(dic):
+            print(Colores.amarillo + "[INFO] Diccionario no seleccionado o inválido. Cancelando." + Colores.reset)
+            return None
+        return [dic]
+
+    if modo == "combinado":
+        print(Colores.cyan + "[INFO] Selecciona DOS diccionarios para ataque combinado." + Colores.reset)
+        d1 = seleccionar_archivo()
+        if not d1 or not validar_archivo(d1):
+            print(Colores.amarillo + "[INFO] Primer diccionario no válido. Cancelando." + Colores.reset)
+            return None
+        d2 = seleccionar_archivo()
+        if not d2 or not validar_archivo(d2):
+            print(Colores.amarillo + "[INFO] Segundo diccionario no válido. Cancelando." + Colores.reset)
+            return None
+        return [d1, d2]
+
+    if modo == "hibrido":
+        print(Colores.cyan + "[INFO] Selecciona el diccionario (wordlist) para el modo híbrido." + Colores.reset)
+        dic = seleccionar_archivo()
+        if not dic or not validar_archivo(dic):
+            print(Colores.amarillo + "[INFO] Diccionario no seleccionado o inválido. Cancelando." + Colores.reset)
+            return None
+        return [dic]
+
     return None
+
 
 def configurar_notificaciones_telegram():
     respuesta = input(t("telegram_notificaciones")).strip().lower()
@@ -709,51 +1005,68 @@ traducciones["en"].update({
     "error_generar_reporte": "[!] Error generating the report.",
 })
 
-def manejar_ctrl_c(signal, frame):
-    print(Colores.verde + t("saliendo") + Colores.reset)
-    time.sleep(1)
-    sys.exit(0)
+def manejar_ctrl_c(proceso):
+    try:
+        print(Colores.amarillo + "\n[!] Interrupción detectada. Finalizando Hashcat..." + Colores.reset)
 
-# Registrar el manejador de señal para Ctrl + C
-signal.signal(signal.SIGINT, manejar_ctrl_c)
+        if proceso and proceso.poll() is None:
+            proceso.terminate()
+            time.sleep(0.5)
+            try:
+                proceso.kill()
+            except:
+                pass
+
+        enviar_notificacion_avanzada("⚠ Ataque detenido manualmente (Ctrl+C).")
+
+        print(Colores.rojo + "[X] Ataque cancelado." + Colores.reset)
+        logging.info("Ataque cancelado por el usuario (Ctrl+C).")
+
+    except Exception as e:
+        print(Colores.rojo + f"[!] Error al manejar Ctrl + C: {e}" + Colores.reset)
+        logging.error(f"Error manejando Ctrl+C: {e}")
 
 def ejecutar_benchmark():
     """
-    Ejecuta un benchmark de Hashcat para medir el rendimiento del hardware.
+    Ejecuta benchmark: se cambia al dir de hashcat, corre '-b', detecta errores y fuerza SIGINT al terminar.
     """
     try:
-        hashcat = configuracion["ruta_hashcat"]
+        hashcat = configuracion.get("ruta_hashcat")
         if not hashcat:
             print(Colores.rojo + "[!] Ruta de Hashcat no definida. Asegurate de que Hashcat este instalado y configurado correctamente." + Colores.reset)
             return
 
+        carpeta = os.path.dirname(hashcat)
+        if carpeta:
+            asegurar_directorio_hashcat(hashcat)  # mantén la funcion existente que hace chdir
         print(Colores.cyan + "[INFO] Ejecutando benchmark de Hashcat...\n" + Colores.reset)
-        proceso = subprocess.Popen([hashcat, "-b"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+        proceso = subprocess.Popen([hashcat, "-b"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+        fallo = False
         for linea in proceso.stdout:
-            print(linea.strip())
+            estado = mostrar_estado_hashcat(linea)
+            if estado == "error":
+                fallo = True
+
         proceso.wait()
-        print(Colores.verde + "[✓] Benchmark finalizado.\n" + Colores.reset)
+
+        if fallo or proceso.returncode != 0:
+            print(Colores.rojo + "[X] Benchmark falló. No se encontró el entorno completo de Hashcat o ocurrió un error." + Colores.reset)
+            logging.error("Benchmark falló. Returncode: %s", proceso.returncode)
+            # breakpoint: avisar al usuario y forzar salida con Ctrl+C
+            print(Colores.amarillo + "[!] Breakpoint: fallo en el benchmark. Saliendo..." + Colores.reset)
+            os.kill(os.getpid(), signal.SIGINT)
+        else:
+            print(Colores.verde + "[✓] Benchmark finalizado exitosamente.\n" + Colores.reset)
+            # forzar Ctrl+C como pediste
+            os.kill(os.getpid(), signal.SIGINT)
+
     except Exception as e:
         print(Colores.rojo + f"[!] Error al ejecutar el benchmark: {e}" + Colores.reset)
-        time.sleep(1)
+        logging.error("Error en benchmark: %s", e, exc_info=True)
 
-def verificar_actualizaciones():
-    """
-    Verifica si hay una nueva version disponible en GitHub y permite actualizar.
-    """
-    try:
-        print(Colores.cyan + "[INFO] Verificando actualizaciones...\n" + Colores.reset)
-        url = "https://github.com/yuutau/YuutaCracker" 
-        response = requests.get(url)
-        if response.status_code == 200:
-            datos = response.json()
-            ultima_version = datos.get("tag_name", "desconocida")
-            print(Colores.verde + f"[INFO] Ultima version disponible: {ultima_version}" + Colores.reset)
-            print(Colores.amarillo + "[INFO] Si deseas actualizar, descarga la ultima versión desde el repositorio de GitHub.\n" + Colores.reset)
-        else:
-            print(Colores.rojo + "[!] No se pudo verificar actualizaciones. Intenta mas tarde." + Colores.reset)
-    except Exception as e:
-        print(Colores.rojo + f"[!] Error al verificar actualizaciones: {e}" + Colores.reset)
+
 
 def menu():
     limpiar_pantalla()
@@ -795,7 +1108,10 @@ def menu():
             return
 
         reglas, diccionarios = configurar_ataque(modo="diccionario")
-        lanzar_hashcat(archivo, None, "diccionario", diccionario=diccionario, reglas=reglas, diccionarios=diccionarios, formato_hash=formato_hash)
+        if not diccionarios:
+            return
+        lanzar_hashcat(archivo, None, "diccionario", diccionario=diccionarios[0], reglas=reglas, diccionarios=None, formato_hash=formato_hash)
+
     elif opcion == "4":
         formato_hash = input(t("formato_hash")).strip()
         if not validar_algoritmo_hash(formato_hash):
